@@ -1,0 +1,5 @@
+# Ignore environment and config files
+.env
+channels.json
+stats.json
+node_modules/
