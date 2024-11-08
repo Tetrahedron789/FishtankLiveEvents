@@ -19,7 +19,7 @@ const client = new Client({
 });
 
 const BOT_OWNER_ID = '767540134572458076'; 
-const BOT_OWNER_GUILD_ID = '1027958226387472467'; 
+const BOT_OWNER_GUILD_ID = '1098155245177163777'; 
 const START_DATE = new Date('2024-10-27'); 
 
 function getCurrentDayNumber() {
