@@ -14,28 +14,29 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ]
+    GatewayIntentBits.MessageContent,
+  ],
 });
 
 const BOT_OWNER_ID = '767540134572458076'; 
 const BOT_OWNER_GUILD_ID = '1098155245177163777'; 
 const START_DATE = new Date('2024-10-27'); 
 
+// Function to calculate the current day number
 function getCurrentDayNumber() {
   const currentDate = new Date();
   const differenceInTime = currentDate - START_DATE;
   const differenceInDays = Math.floor(differenceInTime / (1000 * 60 * 60 * 24));
-  return differenceInDays + 1; 
+  return differenceInDays + 1; // Add 1 to start count from Day 1
 }
 
-// local time
+// Function to get the local system time as a formatted string
 function getCurrentTimeString() {
   const currentDate = new Date();
   return currentDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-// load channels
+// Load channel settings from channels.json
 let channels = { primaryChannel: {}, relayChannels: {} };
 try {
   const data = fs.readFileSync('channels.json', 'utf-8');
@@ -44,12 +45,12 @@ try {
   console.error('Could not read channels.json, starting with empty settings.');
 }
 
-// save channel settings
+// Function to save channel settings to channels.json
 function saveChannels() {
   fs.writeFileSync('channels.json', JSON.stringify(channels, null, 2));
 }
 
-// register commands
+// Register commands
 async function registerCommands() {
   const setChannelCommand = new SlashCommandBuilder()
     .setName('setchannel')
@@ -80,14 +81,14 @@ async function registerCommands() {
   try {
     console.log('Registering commands...');
 
-    // register /setchannel and /removechannel globally
+    // Register /setchannel and /removechannel as global commands
     await rest.put(
       Routes.applicationCommands(client.user.id),
       { body: [setChannelCommand, removeChannelCommand] }
     );
     console.log('/setchannel and /removechannel registered globally.');
 
-    // register /stats on fishtank server
+    // Register /stats as a guild-specific command in the primary server
     await rest.put(
       Routes.applicationGuildCommands(client.user.id, BOT_OWNER_GUILD_ID),
       { body: [statsCommand] }
@@ -104,20 +105,29 @@ client.on('ready', async () => {
   await registerCommands();
 });
 
-//slash commands
+// Handling slash commands
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
   const { commandName, options } = interaction;
 
   if (commandName === 'stats') {
-    if (interaction.user.id !== BOT_OWNER_ID) {
+    // Allow the bot owner, users with the specified role, or administrators in the primary server
+    const hasPermission =
+      interaction.user.id === BOT_OWNER_ID ||
+      (interaction.guild &&
+        (await interaction.guild.members.fetch(interaction.user.id)).permissions.has(PermissionsBitField.Flags.Administrator)) ||
+      (interaction.guild &&
+        (await interaction.guild.members.fetch(interaction.user.id)).roles.cache.has('1191011204479598712'));
+  
+    if (!hasPermission) {
       return await interaction.reply({ content: 'You do not have permission to use this command.', ephemeral: true });
     }
-
+  
+    // Command logic for /stats
     const relayChannelsCount = Object.keys(channels.relayChannels).length;
     const totalServers = client.guilds.cache.size;
-
+  
     await interaction.reply({
       embeds: [
         new EmbedBuilder()
@@ -130,6 +140,7 @@ client.on('interactionCreate', async interaction => {
       ],
     });
   }
+  
 
   if (commandName === 'setchannel') {
     if (!interaction.guild) {
@@ -142,9 +153,10 @@ client.on('interactionCreate', async interaction => {
     }
 
     const channel = options.getChannel('channel');
-    if (!channel || channel.type !== 0) {
-      return await interaction.reply({ content: 'Please select a text channel!', ephemeral: true });
+    if (!channel || (channel.type !== 0 && channel.type !== 5)) {
+      return interaction.reply({ content: 'Please select a text or announcement channel!', ephemeral: true });
     }
+    
 
     channels.relayChannels[interaction.guild.id] = channel.id;
     saveChannels();
@@ -171,7 +183,7 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-//handling edits and deletes
+// Map to store relayed messages for handling edits and deletions
 const relayedMessages = new Map();
 
 client.on('messageCreate', async message => {
@@ -183,7 +195,7 @@ client.on('messageCreate', async message => {
 
   const embed = new EmbedBuilder()
     .setAuthor({ name: message.member ? message.member.displayName : message.author.username, iconURL: message.author.displayAvatarURL() })
-    .setFooter({ text: `Day ${currentDayNumber} [ ${currentTimeString} ]` });
+    .setFooter({ text: `Day ${currentDayNumber}` });
 
   if (message.content.trim()) {
     embed.setDescription(message.content);
@@ -209,8 +221,8 @@ client.on('messageCreate', async message => {
       }
       relayedMessages.get(message.id).set(guildId, sentMessage.id);
     } catch (error) {
-      // handle kicked bot and deleted channels
-      if (error.code === 10003 || error.code === 50001) { 
+      // Handle "Unknown Channel" or "Missing Access" error codes
+      if (error.code === 10003 || error.code === 50001) { // 10003 = Unknown Channel, 50001 = Missing Access
         console.error(`Channel ${relayChannelId} in guild ${guildId} is no longer accessible. Removing from relay channels.`);
         delete channels.relayChannels[guildId];
         saveChannels();
@@ -229,7 +241,7 @@ client.on('messageUpdate', async (oldMessage, newMessage) => {
 
   const updatedEmbed = new EmbedBuilder()
     .setAuthor({ name: newMessage.member ? newMessage.member.displayName : newMessage.author.username, iconURL: newMessage.author.displayAvatarURL() })
-    .setFooter({ text: `Day ${currentDayNumber} [ ${currentTimeString} ]` });
+    .setFooter({ text: `Day ${currentDayNumber}` });
 
   if (newMessage.content.trim()) {
     updatedEmbed.setDescription(newMessage.content);
@@ -253,8 +265,8 @@ client.on('messageUpdate', async (oldMessage, newMessage) => {
         files: videoAttachment ? [videoAttachment.url] : []
       });
     } catch (error) {
-      if (error.code === 10003 || error.code === 50001) {
-        console.error(`Channel ${channels.relayChannels[guildId]} in guild ${guildId} is no longer accessible. Removing from relay channels.`);
+      if (error.code === 10003 || error.code === 50001) { // Unknown Channel or Missing Access
+        console.error(`Channel ${channels.relayChannels[guildId]} is no longer accessible. Removing from relay channels.`);
         delete channels.relayChannels[guildId];
         saveChannels();
       } else {
@@ -275,8 +287,8 @@ client.on('messageDelete', async (deletedMessage) => {
 
       await relayedMessage.delete();
     } catch (error) {
-      if (error.code === 10003 || error.code === 50001) {
-        console.error(`Channel ${channels.relayChannels[guildId]} in guild ${guildId} is no longer accessible. Removing from relay channels.`);
+      if (error.code === 10003 || error.code === 50001) { // Unknown Channel or Missing Access
+        console.error(`Channel ${channels.relayChannels[guildId]} is no longer accessible. Removing from relay channels.`);
         delete channels.relayChannels[guildId];
         saveChannels();
       } else {
@@ -288,5 +300,5 @@ client.on('messageDelete', async (deletedMessage) => {
   relayedMessages.delete(deletedMessage.id);
 });
 
-
+// Log in to Discord
 client.login(process.env.DISCORD_TOKEN);
