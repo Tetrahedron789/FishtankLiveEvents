@@ -14,9 +14,8 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers,
-  ],
+    GatewayIntentBits.MessageContent
+  ]
 });
 
 const BOT_OWNER_ID = '767540134572458076'; 
