@@ -256,8 +256,9 @@ client.on('interactionCreate', async interaction => {
 });
 
 // Map to store relayed messages for handling edits and deletions
+
 const startDate = new Date('2024-10-27'); // Define the start date for "Day 1"
-const relayedMessages = new Map(); // Track original and relayed message IDs for edits
+const relayedMessages = new Map(); // Track original and relayed message IDs for edits and deletes
 
 client.on('messageCreate', async message => {
   await handleMessageRelay(message);
@@ -266,6 +267,27 @@ client.on('messageCreate', async message => {
 client.on('messageUpdate', async (oldMessage, newMessage) => {
   if (relayedMessages.has(newMessage.id)) {
     await handleMessageRelay(newMessage, true);
+  }
+});
+
+client.on('messageDelete', async message => {
+  if (relayedMessages.has(message.id)) {
+    for (const [guildId, messages] of relayedMessages.get(message.id).entries()) {
+      const relayChannelId = channels.relayChannels[guildId];
+      try {
+        const relayChannel = await client.channels.fetch(relayChannelId);
+
+        // Delete each message ID associated with the original message
+        for (const msgId of messages) {
+          const relayedMessage = await relayChannel.messages.fetch(msgId);
+          await relayedMessage.delete();
+        }
+      } catch (error) {
+        console.error(`Failed to delete message in ${relayChannelId} in guild ${guildId}:`, error);
+      }
+    }
+    // Remove the entry from the map after deleting
+    relayedMessages.delete(message.id);
   }
 });
 
@@ -278,33 +300,36 @@ async function handleMessageRelay(message, isEdit = false) {
 
   const embed = new EmbedBuilder()
     .setAuthor({ name: message.member ? message.member.displayName : message.author.username, iconURL: message.author.displayAvatarURL() })
-    .setFooter({ text: `Day ${dayCount}` }) // Footer with "Day ##"
+    .setFooter({ text: `Day ${dayCount}` }) // Footer now only shows "Day ##"
 
   // Handle description based on content and attachments
   if (message.content && message.content.trim().length > 0) {
     embed.setDescription(message.content);
   } else if (message.attachments.some(att => att.contentType?.startsWith('video'))) {
     embed.setDescription(null); // No description for videos only
-  } else if (message.attachments.some(att => att.contentType?.startsWith('image'))) {
+  } else if (message.attachments.some(att => att.contentType?.startsWith('image') && !att.contentType.includes('gif'))) {
     embed.setDescription(null); // No description for images only
   } else {
-    embed.setDescription('No text content'); // Fallback if no text, image, or video
+    embed.setDescription('No message content (this shouldnt be possible)'); // Fallback if no text, image, or video
   }
 
   const maxFileSize = 8 * 1024 * 1024; // 8 MB limit for Discord attachments
   const oversizedFileLinks = [];
+  const gifLinks = [];
   let imageAttachmentUrl = null;
 
-  // Separate attachments: images in embed, videos as links
+  // Separate attachments: images in embed, videos and GIFs as links
   for (const attachment of message.attachments.values()) {
-    if (attachment.contentType?.startsWith('image') && !imageAttachmentUrl) {
-      imageAttachmentUrl = attachment.url; // Use first image as embed image
+    if (attachment.contentType?.startsWith('image') && attachment.contentType !== 'image/gif' && !imageAttachmentUrl) {
+      imageAttachmentUrl = attachment.url; // Use first non-GIF image as embed image
+    } else if (attachment.contentType === 'image/gif') {
+      gifLinks.push(attachment.url); // GIFs are added as links outside the embed
     } else if (attachment.contentType?.startsWith('video')) {
       oversizedFileLinks.push(attachment.url); // Video links outside embed
     }
   }
 
-  // Set image in embed if there’s an image attachment
+  // Set image in embed if there’s a non-GIF image attachment
   if (imageAttachmentUrl) {
     embed.setImage(imageAttachmentUrl);
   }
@@ -313,27 +338,38 @@ async function handleMessageRelay(message, isEdit = false) {
     try {
       const relayChannel = await client.channels.fetch(relayChannelId);
 
+      let sentMessage;
       if (isEdit && relayedMessages.get(message.id)?.has(guildId)) {
         // Edit the relayed message if it exists
-        const relayedMessageId = relayedMessages.get(message.id).get(guildId);
+        const relayedMessageId = relayedMessages.get(message.id).get(guildId)[0]; // Main embed message ID
         const relayedMessage = await relayChannel.messages.fetch(relayedMessageId);
         await relayedMessage.edit({ embeds: [embed] });
+        sentMessage = relayedMessage;
       } else {
         // Send the main embed
-        const sentMessage = await relayChannel.send({ embeds: [embed] });
+        sentMessage = await relayChannel.send({ embeds: [embed] });
 
-        // Track the relayed message ID for future edits
+        // Track the relayed message ID for future edits and deletes
         if (!relayedMessages.has(message.id)) {
           relayedMessages.set(message.id, new Map());
         }
-        relayedMessages.get(message.id).set(guildId, sentMessage.id);
+        relayedMessages.get(message.id).set(guildId, [sentMessage.id]); // Store as an array for multiple IDs
       }
 
       // Send video links as a follow-up message, if any
       if (oversizedFileLinks.length > 0) {
-        await relayChannel.send(
-          `The following video(s) were included in the message:\n${oversizedFileLinks.join('\n')}`
+        const followUpMessage = await relayChannel.send(
+          `${oversizedFileLinks.join('\n')}`
         );
+        relayedMessages.get(message.id).get(guildId).push(followUpMessage.id); // Track follow-up message ID
+      }
+
+      // Send GIF links as a follow-up message, if any
+      if (gifLinks.length > 0) {
+        const gifMessage = await relayChannel.send(
+          `${gifLinks.join('\n')}`
+        );
+        relayedMessages.get(message.id).get(guildId).push(gifMessage.id); // Track GIF message ID
       }
     } catch (error) {
       console.error(`Failed to send or update message in ${relayChannelId} in guild ${guildId}:`, error);
@@ -341,25 +377,6 @@ async function handleMessageRelay(message, isEdit = false) {
   }
 }
 
-
-
-// Handle message deletions
-client.on('messageDelete', async (deletedMessage) => {
-  if (!relayedMessages.has(deletedMessage.id)) return;
-
-  for (const [guildId, relayMessageId] of relayedMessages.get(deletedMessage.id).entries()) {
-    try {
-      const relayChannel = await client.channels.fetch(channels.relayChannels[guildId.split('-')[0]]);
-      const relayedMessage = await relayChannel.messages.fetch(relayMessageId);
-      await relayedMessage.delete();
-    } catch (error) {
-      console.error(`Failed to delete message in guild ${guildId}:`, error);
-    }
-  }
-
-  // Remove the entry from the map
-  relayedMessages.delete(deletedMessage.id);
-});
 
 
 // Log in to Discord
