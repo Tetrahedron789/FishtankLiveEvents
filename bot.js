@@ -258,105 +258,91 @@ client.on('interactionCreate', async interaction => {
 });
 
 // Map to store relayed messages for handling edits and deletions
-const relayedMessages = new Map();
+const startDate = new Date('2024-10-27'); // Define the start date for "Day 1"
+const relayedMessages = new Map(); // Track original and relayed message IDs for edits
 
 client.on('messageCreate', async message => {
+  await handleMessageRelay(message);
+});
+
+client.on('messageUpdate', async (oldMessage, newMessage) => {
+  if (relayedMessages.has(newMessage.id)) {
+    await handleMessageRelay(newMessage, true);
+  }
+});
+
+async function handleMessageRelay(message, isEdit = false) {
   const primaryChannelId = channels.primaryChannel[message.guild.id];
   if (!primaryChannelId || message.channel.id !== primaryChannelId) return;
-  const currentDayNumber = getCurrentDayNumber();
+
+  const currentDate = new Date();
+  const dayCount = Math.floor((currentDate - startDate) / (1000 * 60 * 60 * 24)) + 1;
 
   const embed = new EmbedBuilder()
     .setAuthor({ name: message.member ? message.member.displayName : message.author.username, iconURL: message.author.displayAvatarURL() })
-    .setFooter({ text: `Day ${currentDayNumber}` });
+    .setFooter({ text: `Day ${dayCount}` }) // Footer with "Day ##"
 
-  // Set the description only if there is message content
+  // Handle description based on content and attachments
   if (message.content && message.content.trim().length > 0) {
     embed.setDescription(message.content);
+  } else if (message.attachments.some(att => att.contentType?.startsWith('video'))) {
+    embed.setDescription(null); // No description for videos only
+  } else if (message.attachments.some(att => att.contentType?.startsWith('image'))) {
+    embed.setDescription(null); // No description for images only
   } else {
-    embed.setDescription('Video Attachment'); // Fallback text if message content is empty
+    embed.setDescription('No text content'); // Fallback if no text, image, or video
   }
 
   const maxFileSize = 8 * 1024 * 1024; // 8 MB limit for Discord attachments
   const oversizedFileLinks = [];
-  const attachments = [];
+  let imageAttachmentUrl = null;
 
+  // Separate attachments: images in embed, videos as links
   for (const attachment of message.attachments.values()) {
-    if (attachment.size > maxFileSize) {
-      oversizedFileLinks.push(attachment.url);
-    } else {
-      attachments.push(attachment.url);
+    if (attachment.contentType?.startsWith('image') && !imageAttachmentUrl) {
+      imageAttachmentUrl = attachment.url; // Use first image as embed image
+    } else if (attachment.contentType?.startsWith('video')) {
+      oversizedFileLinks.push(attachment.url); // Video links outside embed
     }
+  }
+
+  // Set image in embed if there’s an image attachment
+  if (imageAttachmentUrl) {
+    embed.setImage(imageAttachmentUrl);
   }
 
   for (const [guildId, relayChannelId] of Object.entries(channels.relayChannels)) {
     try {
       const relayChannel = await client.channels.fetch(relayChannelId);
 
-      // Send the main embed and any attachments within size limit
-      const sentMessage = await relayChannel.send({
-        embeds: [embed],
-        files: attachments
-      });
-
-      // Track the relayed message ID
-      if (!relayedMessages.has(message.id)) {
-        relayedMessages.set(message.id, new Map());
-      }
-      relayedMessages.get(message.id).set(guildId, sentMessage.id);
-
-      // Send a follow-up message with links to oversized files, if any
-      if (oversizedFileLinks.length > 0) {
-        const followUpMessage = await relayChannel.send(
-          `${oversizedFileLinks.join('\n')}`
-        );
-
-        // Track the follow-up message ID as well
-        relayedMessages.get(message.id).set(`${guildId}-followup`, followUpMessage.id);
-      }
-    } catch (error) {
-      console.error(`Failed to send message to ${relayChannelId} in guild ${guildId}:`, error);
-    }
-  }
-});
-
-// Handle message updates
-client.on('messageUpdate', async (oldMessage, newMessage) => {
-  if (!relayedMessages.has(newMessage.id)) return;
-  const currentDayNumber = getCurrentDayNumber();
-
-  const embed = new EmbedBuilder()
-    .setAuthor({ name: newMessage.member ? newMessage.member.displayName : newMessage.author.username, iconURL: newMessage.author.displayAvatarURL() })
-    .setFooter({ text: `Day ${currentDayNumber}` });
-
-  // Set the description only if there is updated message content
-  if (newMessage.content && newMessage.content.trim().length > 0) {
-    embed.setDescription(newMessage.content);
-  } else {
-    embed.setDescription('Video Attachment'); // Fallback text if message content is empty
-  }
-
-  const maxFileSize = 8 * 1024 * 1024;
-  const oversizedFileLinks = newMessage.attachments
-    .filter(attachment => attachment.size > maxFileSize)
-    .map(attachment => attachment.url);
-
-  for (const [guildId, relayMessageId] of relayedMessages.get(newMessage.id).entries()) {
-    try {
-      const relayChannel = await client.channels.fetch(channels.relayChannels[guildId.split('-')[0]]);
-      const relayedMessage = await relayChannel.messages.fetch(relayMessageId);
-
-      if (!guildId.includes('-followup')) {
-        // Update the main relayed message embed
+      if (isEdit && relayedMessages.get(message.id)?.has(guildId)) {
+        // Edit the relayed message if it exists
+        const relayedMessageId = relayedMessages.get(message.id).get(guildId);
+        const relayedMessage = await relayChannel.messages.fetch(relayedMessageId);
         await relayedMessage.edit({ embeds: [embed] });
-      } else if (oversizedFileLinks.length > 0) {
-        // Update the follow-up message with links to oversized files if needed
-        await relayedMessage.edit(`${oversizedFileLinks.join('\n')}`);
+      } else {
+        // Send the main embed
+        const sentMessage = await relayChannel.send({ embeds: [embed] });
+
+        // Track the relayed message ID for future edits
+        if (!relayedMessages.has(message.id)) {
+          relayedMessages.set(message.id, new Map());
+        }
+        relayedMessages.get(message.id).set(guildId, sentMessage.id);
+      }
+
+      // Send video links as a follow-up message, if any
+      if (oversizedFileLinks.length > 0) {
+        await relayChannel.send(
+          `The following video(s) were included in the message:\n${oversizedFileLinks.join('\n')}`
+        );
       }
     } catch (error) {
-      console.error(`Failed to update message in guild ${guildId}:`, error);
+      console.error(`Failed to send or update message in ${relayChannelId} in guild ${guildId}:`, error);
     }
   }
-});
+}
+
 
 
 // Handle message deletions
