@@ -102,12 +102,10 @@ async function registerCommands() {
 
 client.on('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
-  client.user.setPresence({
-    activities: [{ name: 'to /setchannel', type: 'LISTENING' }],
-    status: 'online', // Options: 'online', 'idle', 'dnd'
-  });
+
   await registerCommands();
 });
+
 
 // Handling slash commands
 client.on('interactionCreate', async interaction => {
