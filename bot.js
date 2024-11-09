@@ -102,6 +102,10 @@ async function registerCommands() {
 
 client.on('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
+  client.user.setPresence({
+    activities: [{ name: 'to /setchannel', type: 'LISTENING' }],
+    status: 'online', // Options: 'online', 'idle', 'dnd'
+  });
   await registerCommands();
 });
 
@@ -141,27 +145,97 @@ client.on('interactionCreate', async interaction => {
     });
   }
   
-
+  
   if (commandName === 'setchannel') {
     if (!interaction.guild) {
-      return await interaction.reply({ content: 'This command can only be used within a server.', ephemeral: true });
+      return await interaction.reply({
+        embeds: [
+          new EmbedBuilder()
+            .setDescription('This command can only be used within a server.')
+            .setColor(0xFF0000) // Red color for error
+        ],
+        ephemeral: true
+      });
     }
-
+  
     const member = await interaction.guild.members.fetch(interaction.user.id);
     if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-      return await interaction.reply({ content: 'Only server administrators can set the relay channel.', ephemeral: true });
+      return await interaction.reply({
+        embeds: [
+          new EmbedBuilder()
+            .setDescription('Only server administrators can set the relay channel.')
+            .setColor(0x8A0000) // Red color for error
+        ],
+        ephemeral: true
+      });
     }
-
+  
     const channel = options.getChannel('channel');
     if (!channel || (channel.type !== 0 && channel.type !== 5)) {
-      return interaction.reply({ content: 'Please select a text or announcement channel!', ephemeral: true });
+      return await interaction.reply({
+        embeds: [
+          new EmbedBuilder()
+            .setDescription('Please select a text or announcement channel!')
+            .setColor(0x8A0000) // Red color for error
+        ],
+        ephemeral: true
+      });
     }
-    
-
+  
+    // Fetch the bot's member object in the guild to check permissions
+    const botMember = await interaction.guild.members.fetch(client.user.id);
+  
+    // Check if the bot has the necessary permissions in the selected channel
+    const requiredPermissions = [
+      PermissionsBitField.Flags.ViewChannel,
+      PermissionsBitField.Flags.SendMessages,
+      PermissionsBitField.Flags.EmbedLinks,
+      PermissionsBitField.Flags.AttachFiles,
+    ];
+  
+    const botPermissions = channel.permissionsFor(botMember);
+    const missingPermissions = requiredPermissions.filter(permission => !botPermissions.has(permission));
+  
+    if (missingPermissions.length > 0) {
+      const missingPermissionsNames = missingPermissions.map(permission => {
+        switch (permission) {
+          case PermissionsBitField.Flags.ViewChannel:
+            return '`View Channel`';
+          case PermissionsBitField.Flags.SendMessages:
+            return '`Send Messages`';
+          case PermissionsBitField.Flags.EmbedLinks:
+            return '`Embed Links`';
+          case PermissionsBitField.Flags.AttachFiles:
+            return '`Attach Files`';
+          default:
+            return '`Unknown Permission`';
+        }
+      }).join(', ');
+  
+      return await interaction.reply({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle('Permission Error')
+            .setDescription(`Permissions missing in ${channel}: \n${missingPermissionsNames}\n\nPlease ensure I have these permissions.`)
+            .setColor(0x8A0000) // Red color for error
+        ],
+        ephemeral: true
+      });
+    }
+  
+    // If all permissions are present, set the channel as the relay channel
     channels.relayChannels[interaction.guild.id] = channel.id;
     saveChannels();
-    await interaction.reply(`Relay channel set to ${channel}`);
-  }
+    await interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle('Success')
+          .setDescription(`Relay channel set to ${channel}`)
+          .setColor(0x008A00) // Green color for success
+      ]
+    });
+  }  
+  
 
   if (commandName === 'removechannel') {
     if (!interaction.guild) {
@@ -189,116 +263,120 @@ const relayedMessages = new Map();
 client.on('messageCreate', async message => {
   const primaryChannelId = channels.primaryChannel[message.guild.id];
   if (!primaryChannelId || message.channel.id !== primaryChannelId) return;
-
   const currentDayNumber = getCurrentDayNumber();
-  const currentTimeString = getCurrentTimeString();
 
   const embed = new EmbedBuilder()
     .setAuthor({ name: message.member ? message.member.displayName : message.author.username, iconURL: message.author.displayAvatarURL() })
     .setFooter({ text: `Day ${currentDayNumber}` });
 
-  if (message.content.trim()) {
+  // Set the description only if there is message content
+  if (message.content && message.content.trim().length > 0) {
     embed.setDescription(message.content);
+  } else {
+    embed.setDescription('Video Attachment'); // Fallback text if message content is empty
   }
 
-  const imageAttachment = message.attachments.find(attachment => attachment.contentType?.startsWith('image'));
-  if (imageAttachment) {
-    embed.setImage(imageAttachment.url);
-  }
+  const maxFileSize = 8 * 1024 * 1024; // 8 MB limit for Discord attachments
+  const oversizedFileLinks = [];
+  const attachments = [];
 
-  const videoAttachment = message.attachments.find(attachment => attachment.contentType?.startsWith('video'));
+  for (const attachment of message.attachments.values()) {
+    if (attachment.size > maxFileSize) {
+      oversizedFileLinks.push(attachment.url);
+    } else {
+      attachments.push(attachment.url);
+    }
+  }
 
   for (const [guildId, relayChannelId] of Object.entries(channels.relayChannels)) {
     try {
       const relayChannel = await client.channels.fetch(relayChannelId);
+
+      // Send the main embed and any attachments within size limit
       const sentMessage = await relayChannel.send({
         embeds: [embed],
-        files: videoAttachment ? [videoAttachment.url] : []
+        files: attachments
       });
 
+      // Track the relayed message ID
       if (!relayedMessages.has(message.id)) {
         relayedMessages.set(message.id, new Map());
       }
       relayedMessages.get(message.id).set(guildId, sentMessage.id);
-    } catch (error) {
-      // Handle "Unknown Channel" or "Missing Access" error codes
-      if (error.code === 10003 || error.code === 50001) { // 10003 = Unknown Channel, 50001 = Missing Access
-        console.error(`Channel ${relayChannelId} in guild ${guildId} is no longer accessible. Removing from relay channels.`);
-        delete channels.relayChannels[guildId];
-        saveChannels();
-      } else {
-        console.error(`Failed to send message to ${relayChannelId} in guild ${guildId}:`, error);
+
+      // Send a follow-up message with links to oversized files, if any
+      if (oversizedFileLinks.length > 0) {
+        const followUpMessage = await relayChannel.send(
+          `${oversizedFileLinks.join('\n')}`
+        );
+
+        // Track the follow-up message ID as well
+        relayedMessages.get(message.id).set(`${guildId}-followup`, followUpMessage.id);
       }
+    } catch (error) {
+      console.error(`Failed to send message to ${relayChannelId} in guild ${guildId}:`, error);
     }
   }
 });
 
+// Handle message updates
 client.on('messageUpdate', async (oldMessage, newMessage) => {
   if (!relayedMessages.has(newMessage.id)) return;
-
   const currentDayNumber = getCurrentDayNumber();
-  const currentTimeString = getCurrentTimeString();
 
-  const updatedEmbed = new EmbedBuilder()
+  const embed = new EmbedBuilder()
     .setAuthor({ name: newMessage.member ? newMessage.member.displayName : newMessage.author.username, iconURL: newMessage.author.displayAvatarURL() })
     .setFooter({ text: `Day ${currentDayNumber}` });
 
-  if (newMessage.content.trim()) {
-    updatedEmbed.setDescription(newMessage.content);
+  // Set the description only if there is updated message content
+  if (newMessage.content && newMessage.content.trim().length > 0) {
+    embed.setDescription(newMessage.content);
+  } else {
+    embed.setDescription('Video Attachment'); // Fallback text if message content is empty
   }
 
-  const imageAttachment = newMessage.attachments.find(attachment => attachment.contentType?.startsWith('image'));
-  if (imageAttachment) {
-    updatedEmbed.setImage(imageAttachment.url);
-  }
+  const maxFileSize = 8 * 1024 * 1024;
+  const oversizedFileLinks = newMessage.attachments
+    .filter(attachment => attachment.size > maxFileSize)
+    .map(attachment => attachment.url);
 
-  const videoAttachment = newMessage.attachments.find(attachment => attachment.contentType?.startsWith('video'));
-
-  const relayedMessageInfo = relayedMessages.get(newMessage.id);
-  for (const [guildId, relayedMessageId] of relayedMessageInfo.entries()) {
+  for (const [guildId, relayMessageId] of relayedMessages.get(newMessage.id).entries()) {
     try {
-      const relayChannel = await client.channels.fetch(channels.relayChannels[guildId]);
-      const relayedMessage = await relayChannel.messages.fetch(relayedMessageId);
+      const relayChannel = await client.channels.fetch(channels.relayChannels[guildId.split('-')[0]]);
+      const relayedMessage = await relayChannel.messages.fetch(relayMessageId);
 
-      await relayedMessage.edit({
-        embeds: [updatedEmbed],
-        files: videoAttachment ? [videoAttachment.url] : []
-      });
-    } catch (error) {
-      if (error.code === 10003 || error.code === 50001) { // Unknown Channel or Missing Access
-        console.error(`Channel ${channels.relayChannels[guildId]} is no longer accessible. Removing from relay channels.`);
-        delete channels.relayChannels[guildId];
-        saveChannels();
-      } else {
-        console.error(`Failed to update message in guild ${guildId}:`, error);
+      if (!guildId.includes('-followup')) {
+        // Update the main relayed message embed
+        await relayedMessage.edit({ embeds: [embed] });
+      } else if (oversizedFileLinks.length > 0) {
+        // Update the follow-up message with links to oversized files if needed
+        await relayedMessage.edit(`${oversizedFileLinks.join('\n')}`);
       }
+    } catch (error) {
+      console.error(`Failed to update message in guild ${guildId}:`, error);
     }
   }
 });
 
+
+// Handle message deletions
 client.on('messageDelete', async (deletedMessage) => {
   if (!relayedMessages.has(deletedMessage.id)) return;
 
-  const relayedMessageInfo = relayedMessages.get(deletedMessage.id);
-  for (const [guildId, relayedMessageId] of relayedMessageInfo.entries()) {
+  for (const [guildId, relayMessageId] of relayedMessages.get(deletedMessage.id).entries()) {
     try {
-      const relayChannel = await client.channels.fetch(channels.relayChannels[guildId]);
-      const relayedMessage = await relayChannel.messages.fetch(relayedMessageId);
-
+      const relayChannel = await client.channels.fetch(channels.relayChannels[guildId.split('-')[0]]);
+      const relayedMessage = await relayChannel.messages.fetch(relayMessageId);
       await relayedMessage.delete();
     } catch (error) {
-      if (error.code === 10003 || error.code === 50001) { // Unknown Channel or Missing Access
-        console.error(`Channel ${channels.relayChannels[guildId]} is no longer accessible. Removing from relay channels.`);
-        delete channels.relayChannels[guildId];
-        saveChannels();
-      } else {
-        console.error(`Failed to delete message in guild ${guildId}:`, error);
-      }
+      console.error(`Failed to delete message in guild ${guildId}:`, error);
     }
   }
 
+  // Remove the entry from the map
   relayedMessages.delete(deletedMessage.id);
 });
+
 
 // Log in to Discord
 client.login(process.env.DISCORD_TOKEN);
